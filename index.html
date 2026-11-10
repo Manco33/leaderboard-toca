@@ -1,0 +1,176 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <title>TOCA SOCIAL — TV Leaderboard En Vivo</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Press+Start+2P&family=Orbitron:wght@400;700;900&family=Share+Tech+Mono&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="styles.css">
+  <script src="supabase.js"></script>
+</head>
+<body class="rot-270 xmas-active">
+
+  <!-- CRT scanlines overlay -->
+  <div class="scanlines" aria-hidden="true"></div>
+  <!-- Screen flicker -->
+  <div class="crt-flicker" aria-hidden="true"></div>
+
+  <div id="app">
+
+    <!-- ═══ Pixel Snowfall Canvas (Inside #app so it respects 270° TV orientation) ═══ -->
+    <canvas id="snow-canvas" class="snow-canvas" aria-hidden="true"></canvas>
+
+    <!-- ═══ Header ═══ -->
+    <header id="header">
+      <div class="header-left" id="logo-unlock-trigger" title="5 clics para abrir Ajustes Kiosk">
+        <img src="toca_pixel_logo.png" alt="TOCA Social" class="toca-logo">
+      </div>
+      <div class="header-center">
+        <div class="leaderboard-pill">
+          <span class="pill-dot" id="live-status-dot">◆</span>
+          <h1 class="header-title">LEADERBOARD</h1>
+          <span class="pill-dot">◆</span>
+        </div>
+      </div>
+      <div class="header-right">
+        <div class="header-clock-row">
+          <div id="clock" class="clock">--:--:--</div>
+          <button id="btn-kiosk-settings" class="kiosk-gear-btn" title="Ajustes Kiosk TV" aria-label="Ajustes">
+            <svg class="gear-svg" viewBox="0 0 16 16" width="16" height="16" fill="currentColor" aria-hidden="true">
+              <path d="M6 1h4v2h2v2h2v4h-2v2h-2v2H6v-2H4V9H2V5h2V3h2V1zm0 4v4h4V5H6z"/>
+            </svg>
+          </button>
+        </div>
+        <div id="date-display" class="date-text"></div>
+      </div>
+
+      <!-- Guirnalda de luces arcade navideñas (puro CSS/pixel, sin emojis) -->
+      <div id="xmas-garland" class="xmas-garland" aria-hidden="true"></div>
+    </header>
+
+    <!-- ═══ Game Tabs ═══ -->
+    <nav id="game-tabs"></nav>
+
+    <!-- ═══ Mode Toggle ═══ -->
+    <div class="mode-bar">
+      <div class="mode-label" id="mode-label-today">▶ CAMPEONES DE HOY</div>
+      <div class="mode-progress">
+        <div id="mode-progress-fill" class="mode-progress-fill"></div>
+      </div>
+      <div class="mode-label" id="mode-label-alltime">RÉCORDS HISTÓRICOS ◀</div>
+    </div>
+
+    <!-- ═══ Game Sub-header ═══ -->
+    <div id="game-header" class="game-header"></div>
+
+    <!-- ═══ Score Column Headers ═══ -->
+    <div class="list-header">
+      <span class="lh-rank">POS</span>
+      <span class="lh-name">JUGADOR</span>
+      <span class="lh-bar"></span>
+      <span class="lh-score">PUNTOS</span>
+    </div>
+
+    <!-- ═══ Score List ═══ -->
+    <main id="score-list" class="score-list"></main>
+
+    <!-- ═══ Footer ticker (ESPN / Retro Arcade) ═══ -->
+    <footer id="footer" class="footer">
+      <div class="footer-badge" id="footer-live-badge">
+        <span class="badge-dot" id="footer-live-dot">●</span>
+        <span class="badge-text" id="footer-live-text">EN VIVO</span>
+      </div>
+      <div class="ticker-wrapper">
+        <div id="footer-ticker-track" class="ticker-track"></div>
+      </div>
+    </footer>
+
+  </div><!-- /#app -->
+
+  <!-- ═══ Record Break Overlay ═══ -->
+  <div id="record-overlay" class="record-overlay hidden">
+    <div class="rec-scanlines"></div>
+    <div class="record-content">
+      <div class="rec-border-top">████████████████████████████████</div>
+      <div class="rec-trophy-wrap">
+        <!-- Trofeo 8-bit Pixel Art SVG (Sin emojis) -->
+        <svg class="rec-trophy-svg" viewBox="0 0 16 16" width="84" height="84" aria-hidden="true">
+          <path fill="#ffe600" d="M4 1h8v2h3v4h-3v2h-2v2H9v2h3v2H4v-2h3v-2H6V9H4V7H1V3h3V1zm-1 3H2v2h1V4zm10 0v2h1V4h-1z"/>
+          <path fill="#ffffff" d="M5 2h2v5H5V2z"/>
+          <path fill="#ff84ff" d="M6 13h4v1H6v-1z"/>
+        </svg>
+      </div>
+      <div class="rec-new-record blink-text">★ NUEVO RÉCORD ★</div>
+      <div id="rec-game"   class="rec-game"></div>
+      <div class="rec-line">▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬</div>
+      <div id="rec-player" class="rec-player"></div>
+      <div id="rec-score"  class="rec-score"></div>
+      <div class="rec-pts-label">— P T S —</div>
+      <div id="rec-prev"   class="rec-prev"></div>
+      <div class="rec-border-bot">████████████████████████████████</div>
+    </div>
+  </div>
+
+  <!-- ═══ Kiosk Web Settings Modal (Replaces Android Web Kiosk Settings) ═══ -->
+  <div id="kiosk-modal" class="kiosk-modal hidden">
+    <div class="kiosk-modal-box">
+      <div class="kiosk-modal-header">
+        <span>[ CONFIGURACIÓN WEB KIOSK — TV TOCA SOCIAL ]</span>
+        <button id="btn-close-modal" class="kiosk-close-btn">X</button>
+      </div>
+      <div class="kiosk-modal-body">
+        <div class="kiosk-field">
+          <label>ROTACIÓN DE PANTALLA (TV VERTICAL / HORIZONTAL):</label>
+          <div class="kiosk-rot-group" id="rot-btn-group">
+            <button type="button" class="kiosk-opt-btn" data-rot="0">0° (Normal)</button>
+            <button type="button" class="kiosk-opt-btn" data-rot="90">90° (Vertical)</button>
+            <button type="button" class="kiosk-opt-btn" data-rot="180">180° (Invertido)</button>
+            <button type="button" class="kiosk-opt-btn" data-rot="270">270° (TV Kiosk)</button>
+          </div>
+        </div>
+
+        <div class="kiosk-field">
+          <label>AMBIENTACIÓN DE TEMPORADA (NIEVE Y LUCES ARCADE):</label>
+          <div class="kiosk-xmas-group" id="xmas-btn-group">
+            <button type="button" class="kiosk-opt-btn active" data-xmas="on">MODO NAVIDEÑO ACTIVO</button>
+            <button type="button" class="kiosk-opt-btn" data-xmas="off">MODO CLÁSICO (SIN NIEVE)</button>
+          </div>
+        </div>
+
+        <div class="kiosk-field">
+          <label>MODO DE CÁLCULO DE PUNTAJES:</label>
+          <select id="kiosk-score-mode" class="kiosk-select">
+            <option value="best">Mejor Puntaje Individual (Récord por Partida — Clásico TV)</option>
+            <option value="sum">Suma Acumulada de Partidas (Modo Torneo)</option>
+          </select>
+        </div>
+
+        <div class="kiosk-field-row">
+          <div class="kiosk-field">
+            <label>SEGUNDOS "HOY":</label>
+            <input type="number" id="kiosk-hoy-sec" class="kiosk-input" min="4" max="120" value="12">
+          </div>
+          <div class="kiosk-field">
+            <label>SEGUNDOS "HISTÓRICO":</label>
+            <input type="number" id="kiosk-alltime-sec" class="kiosk-input" min="4" max="120" value="8">
+          </div>
+        </div>
+
+        <div class="kiosk-actions-row">
+          <button type="button" id="btn-fullscreen" class="kiosk-action-btn">[ PANTALLA COMPLETA ]</button>
+          <button type="button" id="btn-test-record" class="kiosk-action-btn pink">[ PROBAR RÉCORD ]</button>
+        </div>
+
+        <div class="kiosk-modal-footer">
+          <span id="kiosk-conn-info" class="kiosk-conn-info">● Supabase Realtime: Conectado</span>
+          <button type="button" id="btn-save-kiosk" class="kiosk-save-btn">GUARDAR Y APLICAR</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>
