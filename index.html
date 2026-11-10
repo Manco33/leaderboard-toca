@@ -10,22 +10,17 @@
   <link rel="stylesheet" href="styles.css">
   <script src="supabase.js"></script>
 </head>
-<body class="rot-270 xmas-active">
-
-  <!-- CRT scanlines overlay -->
-  <div class="scanlines" aria-hidden="true"></div>
-  <!-- Screen flicker -->
-  <div class="crt-flicker" aria-hidden="true"></div>
+<body class="rot-270 xmas-active tv-perf">
 
   <div id="app">
 
-    <!-- ═══ Pixel Snowfall Canvas (Inside #app so it respects 270° TV orientation) ═══ -->
-    <canvas id="snow-canvas" class="snow-canvas" aria-hidden="true"></canvas>
+    <!-- ═══ Pixel Snowfall Canvas (Low-res buffer upscaled for 60fps Smart TV performance) ═══ -->
+    <canvas id="snow-canvas" class="snow-canvas" width="360" height="640" aria-hidden="true"></canvas>
 
     <!-- ═══ Header ═══ -->
     <header id="header">
       <div class="header-left" id="logo-unlock-trigger" title="5 clics para abrir Ajustes Kiosk">
-        <img src="toca_pixel_logo.png" alt="TOCA Social" class="toca-logo">
+        <img src="toca_pixel_logo.png" alt="TOCA Social" class="toca-logo" decoding="async">
       </div>
       <div class="header-center">
         <div class="leaderboard-pill">
@@ -46,7 +41,7 @@
         <div id="date-display" class="date-text"></div>
       </div>
 
-      <!-- Guirnalda de luces arcade navideñas (puro CSS/pixel, sin emojis) -->
+      <!-- Guirnalda de luces arcade navideñas (optimizada con opacity GPU, sin filtros pesados) -->
       <div id="xmas-garland" class="xmas-garland" aria-hidden="true"></div>
     </header>
 
@@ -91,7 +86,6 @@
 
   <!-- ═══ Record Break Overlay ═══ -->
   <div id="record-overlay" class="record-overlay hidden">
-    <div class="rec-scanlines"></div>
     <div class="record-content">
       <div class="rec-border-top">████████████████████████████████</div>
       <div class="rec-trophy-wrap">

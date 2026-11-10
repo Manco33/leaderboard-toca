@@ -1,14 +1,15 @@
 /**
  * TOCA SOCIAL — TV Leaderboard Web Engine  |  app.js
+ * (Samsung Smart TV 60FPS Hardware-Accelerated Edition)
  *
  * Basado en el modelo original de TV Toca Social (Retro Arcade + SQLite)
  * adaptado 100% a Web en Tiempo Real con Supabase (match_scores).
  *
- * Rotación de fases:
- *   Por cada juego → muestra CAMPEONES DE HOY (12 s) → luego RÉCORDS HISTÓRICOS (8 s) → siguiente juego
- *
- * Siempre renderiza 10 filas con barras segmentadas de 22 bloques,
- * ticker inferior en vivo estilo ESPN y celebración de Nuevo Récord a pantalla completa.
+ * Optimizaciones Smart TV (Tizen / WebOS / Android TV):
+ *   - Escalado nativo 1080×1920 por hardware (soporta viewports 720p, 1080p y 4K sin deformar)
+ *   - Barra de progreso acelerada por GPU (transform: scaleX) con 0 ciclos de CPU por frame
+ *   - Motor de nieve Pixel-Art en buffer ligero (360×640 @ 30fps) con 0 cambios de globalAlpha
+ *   - Diffing inteligente de DOM: el cintillo inferior y la tabla no se destruyen en cada sync si no cambiaron los datos
  */
 
 // ════════════════════════════════════════
@@ -47,7 +48,7 @@ var SEG_COUNT     = 22;    // segments in the pixelated progress bar
 var HOY_MS        = 12000; // 12 s showing today's scores
 var ALLTIME_MS    = 8000;  // 8 s showing all-time records
 var PLACEHOLDER_N = 10;    // always render this many rows
-var SYNC_MS       = 8000;  // background REST sync interval
+var SYNC_MS       = 10000; // background REST sync interval
 
 var currentGameIdx = 0;
 var currentMode    = 'today';   // 'today' | 'alltime'
@@ -56,15 +57,15 @@ var screenRotation = 270;       // 270° por defecto para la posición vertical 
 var xmasMode       = true;      // Modo Navideño / Nieve Arcade activo por defecto
 
 var phaseTimer    = null;
-var rafProgress   = null;
-var progressStart = 0;
 var phaseDuration = HOY_MS;
 
-// Cache en memoria (reemplaza SQLite local manteniendo velocidad instantánea)
-var cacheToday   = {}; // { STRIKER: [...], ATOMSPLITTER: [...], ... }
-var cacheAllTime = {}; // { STRIKER: [...], ATOMSPLITTER: [...], ... }
-var recentLiveEvents = []; // Últimos disparos en vivo para el ticker ESPN
+// Cache en memoria + firmas para evitar repintados innecesarios en Smart TV
+var cacheToday   = {};
+var cacheAllTime = {};
+var recentLiveEvents = [];
 var realtimeConnected = false;
+var lastListSignature   = '';
+var lastFooterSignature = '';
 
 // ════════════════════════════════════════
 //  BOOT
@@ -74,6 +75,9 @@ document.addEventListener('DOMContentLoaded', function () {
   loadKioskSettings();
   applyScreenRotation(screenRotation);
   applyXmasMode(xmasMode);
+  fitTvViewport();
+  window.addEventListener('resize', fitTvViewport);
+
   buildXmasGarland();
   initSnowfall();
   buildTabs();
@@ -84,7 +88,7 @@ document.addEventListener('DOMContentLoaded', function () {
   // Cargar caché previo de localStorage si existe para arranque instantáneo
   loadLocalCache();
   enterPhase('today');
-  renderFooter();
+  renderFooter(true);
 
   // Sincronizar con Supabase inmediatamente y suscribirse a Realtime
   syncAllGamesFromSupabase(true);
@@ -95,8 +99,33 @@ document.addEventListener('DOMContentLoaded', function () {
 });
 
 // ════════════════════════════════════════
+//  NATIVE 1080×1920 HARDWARE SCALER FOR SMART TV
+// ════════════════════════════════════════
+
+function fitTvViewport() {
+  var vw = window.innerWidth  || 1920;
+  var vh = window.innerHeight || 1080;
+  var scaleX = 1;
+  var scaleY = 1;
+
+  if (screenRotation === 90 || screenRotation === 270) {
+    // Al rotar 90° o 270°, el ancho de 1080px ocupa el alto de la TV (vh)
+    // y el alto de 1920px ocupa el ancho de la TV (vw)
+    scaleX = vh / 1080;
+    scaleY = vw / 1920;
+  } else {
+    scaleX = vw / 1080;
+    scaleY = vh / 1920;
+  }
+
+  var rootStyle = document.documentElement.style;
+  rootStyle.setProperty('--tv-scale-x', scaleX.toFixed(5));
+  rootStyle.setProperty('--tv-scale-y', scaleY.toFixed(5));
+}
+
+// ════════════════════════════════════════
 //  PIXEL SNOWFALL & CHRISTMAS GARLAND ENGINE
-//  (100% Canvas & Pixel Art — Cero Emojis)
+//  (Optimizado para TV Samsung: Buffer 360×640 @ 30fps)
 // ════════════════════════════════════════
 
 function applyXmasMode(enabled) {
@@ -109,7 +138,7 @@ function buildXmasGarland() {
   if (!garland) return;
   var colors = ['c-red', 'c-ice', 'c-aqua', 'c-gold', 'c-pink'];
   var html = '';
-  for (var i = 0; i < 28; i++) {
+  for (var i = 0; i < 24; i++) {
     var cls = colors[i % colors.length];
     html += '<span class="xmas-bulb ' + cls + '"></span>';
   }
@@ -118,42 +147,37 @@ function buildXmasGarland() {
 
 function initSnowfall() {
   var canvas = document.getElementById('snow-canvas');
-  var appEl  = document.getElementById('app');
-  if (!canvas || !appEl) return;
+  if (!canvas) return;
 
-  var ctx = canvas.getContext('2d');
-  var width = 1080;
-  var height = 1920;
+  // Buffer ligero fijo de 360x640 (escalado por GPU con image-rendering: pixelated)
+  // Reduce en 90% el ancho de banda de memoria gráfica en TVs Samsung Tizen
+  var W = 360;
+  var H = 640;
+  canvas.width  = W;
+  canvas.height = H;
 
-  function resizeSnowCanvas() {
-    var rectW = appEl.clientWidth  || 1080;
-    var rectH = appEl.clientHeight || 1920;
-    width  = canvas.width  = rectW;
-    height = canvas.height = rectH;
-  }
-  resizeSnowCanvas();
-  window.addEventListener('resize', resizeSnowCanvas);
+  var ctx = canvas.getContext('2d', { alpha: true });
+  if (ctx) ctx.imageSmoothingEnabled = false;
 
-  var FLAKE_COUNT = 115;
+  var FLAKE_COUNT = 42;
   var flakes = [];
-  var palette = ['#ffffff', '#ffffff', '#ffffff', '#d6fff6', '#00ffc2', '#ff84ff'];
+  // Colores con alpha pre-calculado para no cambiar ctx.globalAlpha en cada partícula
+  var colorsLayer0 = ['rgba(255,255,255,0.42)', 'rgba(214,255,246,0.40)'];
+  var colorsLayer1 = ['rgba(255,255,255,0.75)', 'rgba(214,255,246,0.72)', 'rgba(0,255,194,0.65)'];
+  var colorsLayer2 = ['rgba(255,255,255,0.92)', 'rgba(255,132,255,0.82)', 'rgba(0,255,194,0.85)'];
 
   function createFlake(randomY) {
-    // 3 capas de profundidad: 0 = fondo lento, 1 = medio, 2 = primer plano con cristal pixelado
-    var layer = Math.random() < 0.22 ? 2 : (Math.random() < 0.55 ? 1 : 0);
-    var size  = layer === 2 ? 4 : (layer === 1 ? 4 : 2);
+    var r = Math.random();
+    var layer = r < 0.20 ? 2 : (r < 0.60 ? 1 : 0);
+    var cList = layer === 2 ? colorsLayer2 : (layer === 1 ? colorsLayer1 : colorsLayer0);
     return {
-      x: Math.random() * width,
-      y: randomY ? Math.random() * height : -16 - Math.random() * 40,
-      vy: layer === 2 ? (1.35 + Math.random() * 0.85) : layer === 1 ? (0.85 + Math.random() * 0.55) : (0.45 + Math.random() * 0.35),
-      vx: (Math.random() - 0.5) * 0.45,
-      swayAmp: 0.35 + Math.random() * 0.65,
-      swaySpeed: 0.012 + Math.random() * 0.02,
-      phase: Math.random() * Math.PI * 2,
-      size: size,
+      x: Math.random() * W,
+      y: randomY ? Math.random() * H : -8 - Math.random() * 20,
+      vy: layer === 2 ? (0.85 + Math.random() * 0.45) : layer === 1 ? (0.55 + Math.random() * 0.30) : (0.32 + Math.random() * 0.20),
+      vx: (Math.random() - 0.5) * 0.25,
+      size: layer === 0 ? 1 : 2,
       isCrystal: layer === 2,
-      color: palette[Math.floor(Math.random() * palette.length)],
-      alpha: layer === 2 ? 0.92 : (layer === 1 ? 0.72 : 0.45)
+      color: cList[Math.floor(Math.random() * cList.length)]
     };
   }
 
@@ -161,59 +185,41 @@ function initSnowfall() {
     flakes.push(createFlake(true));
   }
 
-  function drawPixelCrystal(x, y, p, color, alpha) {
-    ctx.globalAlpha = alpha;
-    ctx.fillStyle = color;
-    // Centro y brazos en cruz estilo 8-bit (sin antialiasing)
-    ctx.fillRect(x, y, p, p);
-    ctx.fillRect(x - p, y, p, p);
-    ctx.fillRect(x + p, y, p, p);
-    ctx.fillRect(x, y - p, p, p);
-    ctx.fillRect(x, y + p, p, p);
-    // Puntas externas más tenues para efecto cristal arcade
-    ctx.globalAlpha = alpha * 0.55;
-    ctx.fillRect(x - p * 2, y, p, p);
-    ctx.fillRect(x + p * 2, y, p, p);
-    ctx.fillRect(x, y - p * 2, p, p);
-    ctx.fillRect(x, y + p * 2, p, p);
-  }
+  var lastFrameTime = 0;
+  var FRAME_INTERVAL = 33; // ~30 FPS estables para no saturar el hilo de composición de la TV
 
-  function tickSnow() {
-    if (xmasMode) {
-      if (canvas.width !== appEl.clientWidth || canvas.height !== appEl.clientHeight) {
-        resizeSnowCanvas();
-      }
-      ctx.clearRect(0, 0, width, height);
-
-      for (var i = 0; i < flakes.length; i++) {
-        var f = flakes[i];
-        f.phase += f.swaySpeed;
-        f.y += f.vy;
-        f.x += f.vx + Math.sin(f.phase) * f.swayAmp;
-
-        // Reaparecer arriba al llegar al borde inferior
-        if (f.y > height + 20) {
-          flakes[i] = createFlake(false);
-          continue;
-        }
-        if (f.x < -20) f.x = width + 15;
-        if (f.x > width + 20) f.x = -15;
-
-        // Snap a coordenadas enteras para estética pixel-perfect
-        var px = Math.round(f.x);
-        var py = Math.round(f.y);
-
-        if (f.isCrystal) {
-          drawPixelCrystal(px, py, 3, f.color, f.alpha);
-        } else {
-          ctx.globalAlpha = f.alpha;
-          ctx.fillStyle = f.color;
-          ctx.fillRect(px, py, f.size, f.size);
-        }
-      }
-      ctx.globalAlpha = 1;
-    }
+  function tickSnow(now) {
     requestAnimationFrame(tickSnow);
+    if (!xmasMode) return;
+    if (now - lastFrameTime < FRAME_INTERVAL) return;
+    lastFrameTime = now;
+
+    ctx.clearRect(0, 0, W, H);
+
+    for (var i = 0; i < FLAKE_COUNT; i++) {
+      var f = flakes[i];
+      f.y += f.vy;
+      f.x += f.vx;
+
+      if (f.y > H + 6) {
+        f.y = -6;
+        f.x = Math.random() * W;
+      }
+      if (f.x < -6) f.x = W + 4;
+      else if (f.x > W + 6) f.x = -4;
+
+      var px = f.x | 0;
+      var py = f.y | 0;
+
+      ctx.fillStyle = f.color;
+      if (f.isCrystal) {
+        // Cruz pixelada 8-bit en una sola pasada
+        ctx.fillRect(px - 1, py, 3, 1);
+        ctx.fillRect(px, py - 1, 1, 3);
+      } else {
+        ctx.fillRect(px, py, f.size, f.size);
+      }
+    }
   }
 
   requestAnimationFrame(tickSnow);
@@ -228,9 +234,7 @@ function isValidPlayerName(rawName) {
   var name = String(rawName).trim();
   if (!name) return false;
   if (FAKE_SEEDS.indexOf(name.toLowerCase()) !== -1) return false;
-  // Descartar nombres que parecen fechas (dd/mm/yyyy)
   if (/^\d{1,2}\/\d{1,2}\/\d{4}$/.test(name)) return false;
-  // Debe tener al menos 2 letras alfabéticas
   var letters = name.replace(/[^a-zA-ZáéíóúÁÉÍÓÚñÑ]/g, '');
   if (letters.length < 2) return false;
   return true;
@@ -238,7 +242,6 @@ function isValidPlayerName(rawName) {
 
 // ════════════════════════════════════════
 //  SUPABASE REALTIME & REST SYNC ENGINE
-//  (Replaces TocaApiClient.kt + ScoreRepository.kt)
 // ════════════════════════════════════════
 
 function getGuatemalaDateStr(dateObj) {
@@ -263,7 +266,6 @@ function getGuatemalaDateStr(dateObj) {
 
 function getGuatemalaTodayStartISO() {
   var todayStr = getGuatemalaDateStr(new Date());
-  // America/Guatemala es UTC-6 todo el año (sin horario de verano)
   return todayStr + 'T00:00:00-06:00';
 }
 
@@ -283,10 +285,6 @@ function fetchSupabaseRest(queryPath) {
   });
 }
 
-/**
- * Agrupa y ordena una lista de filas de match_scores según el modo (best vs sum)
- * y aplica las reglas de Toca Challenge (individual) y limpieza de nombres.
- */
 function processRawRowsToTop10(rows, game) {
   if (!Array.isArray(rows) || rows.length === 0) return [];
   var isTocaChallenge = (game.id === 'TOCACHALLENGE');
@@ -345,12 +343,10 @@ function processRawRowsToTop10(rows, game) {
 function syncGameFromSupabase(game, isInitialBoot) {
   var todayStartIso = encodeURIComponent(getGuatemalaTodayStartISO());
 
-  // 1) Consulta All-Time (Top 250 por puntaje descendente para ese juego)
   var allTimeQuery = 'match_scores?select=player_name,score,box_id,played_at' +
     '&game_id=eq.' + encodeURIComponent(game.dbId) +
     '&order=score.desc&limit=250';
 
-  // 2) Consulta Hoy (desde las 00:00 hora Guatemala)
   var todayQuery = 'match_scores?select=player_name,score,box_id,played_at' +
     '&game_id=eq.' + encodeURIComponent(game.dbId) +
     '&played_at=gte.' + todayStartIso +
@@ -363,7 +359,6 @@ function syncGameFromSupabase(game, isInitialBoot) {
     var allTimeRows = results[0] || [];
     var todayRows   = results[1] || [];
 
-    // Detectar si hubo ruptura de récord histórico respecto a nuestro caché previo
     var prevTop1 = (cacheAllTime[game.id] && cacheAllTime[game.id][0]) ? cacheAllTime[game.id][0] : null;
     var newAllTimeTop10 = processRawRowsToTop10(allTimeRows, game);
     cacheAllTime[game.id] = newAllTimeTop10;
@@ -382,7 +377,6 @@ function syncGameFromSupabase(game, isInitialBoot) {
     }
 
     // ESTRICTAMENTE SOLO RÉCORDS DE HOY (00:00 a 23:59 hora Guatemala)
-    // Filtramos además por fecha exacta de hoy para garantizar que nunca aparezcan días anteriores
     var todayStr = getGuatemalaDateStr(new Date());
     var strictTodayRows = todayRows.filter(function (r) {
       return r.played_at && getGuatemalaDateStr(new Date(r.played_at)) === todayStr;
@@ -400,8 +394,8 @@ function syncAllGamesFromSupabase(isInitialBoot) {
 
   Promise.all(promises).then(function () {
     saveLocalCache();
-    loadAndRender();
-    renderFooter();
+    loadAndRender(false);
+    renderFooter(false);
   });
 }
 
@@ -414,7 +408,6 @@ function initSupabaseRealtime() {
         var row = payload && payload.new;
         if (!row) return;
 
-        // Encontrar el juego correspondiente
         var matchedGame = null;
         for (var i = 0; i < GAMES.length; i++) {
           if (GAMES[i].dbId === row.game_id) {
@@ -428,7 +421,6 @@ function initSupabaseRealtime() {
         var boxLabel   = row.box_id ? String(row.box_id).toUpperCase() : 'BOX';
 
         if (matchedGame && scoreVal > 0 && isValidPlayerName(playerName)) {
-          // 1. Verificar si este tiro en vivo acaba de romper el Récord Histórico #1
           var currentTop1 = (cacheAllTime[matchedGame.id] && cacheAllTime[matchedGame.id][0])
             ? cacheAllTime[matchedGame.id][0]
             : null;
@@ -443,7 +435,6 @@ function initSupabaseRealtime() {
             });
           }
 
-          // 2. Agregar al ticker en vivo estilo ESPN
           recentLiveEvents.unshift({
             game: matchedGame,
             playerName: playerName,
@@ -452,11 +443,10 @@ function initSupabaseRealtime() {
           });
           if (recentLiveEvents.length > 6) recentLiveEvents.pop();
 
-          // 3. Sincronizar de inmediato ese juego y refrescar pantalla
           syncGameFromSupabase(matchedGame, false).then(function () {
             saveLocalCache();
-            loadAndRender();
-            renderFooter();
+            loadAndRender(false);
+            renderFooter(true);
           });
         }
       })
@@ -492,7 +482,6 @@ function loadLocalCache() {
     var savedDate = localStorage.getItem('toca_tv_cache_date');
     var t = localStorage.getItem('toca_tv_cache_today');
     var a = localStorage.getItem('toca_tv_cache_alltime');
-    // Solo cargar caché de HOY si corresponde exactamente a la fecha de hoy
     if (t && savedDate === todayStr) {
       var parsedToday = JSON.parse(t) || {};
       Object.keys(parsedToday).forEach(function (gKey) {
@@ -511,6 +500,8 @@ function loadLocalCache() {
 // ════════════════════════════════════════
 //  CLOCK (America/Guatemala)
 // ════════════════════════════════════════
+
+var lastDateRendered = '';
 
 function startClock() {
   tickClock();
@@ -540,7 +531,11 @@ function tickClock() {
         month: 'short',
         year: 'numeric'
       });
-      dateEl.textContent = dStr.charAt(0).toUpperCase() + dStr.slice(1);
+      var formattedDate = dStr.charAt(0).toUpperCase() + dStr.slice(1);
+      if (formattedDate !== lastDateRendered) {
+        lastDateRendered = formattedDate;
+        dateEl.textContent = formattedDate;
+      }
     }
   } catch (e) {
     if (clockEl) clockEl.textContent = now.toTimeString().slice(0, 8);
@@ -560,12 +555,12 @@ function buildTabs() {
     btn.className = 'game-tab' + (idx === currentGameIdx ? ' active' : '');
     btn.id = 'tab-' + idx;
     btn.innerHTML =
-      '<img src="' + game.logo + '" class="tab-game-logo" alt="' + game.label + '">' +
+      '<img src="' + game.logo + '" class="tab-game-logo" alt="' + game.label + '" decoding="async">' +
       '<span class="tab-game-label">' + game.label + '</span>';
     btn.addEventListener('click', function () {
       currentGameIdx = idx;
       refreshTabsUI();
-      enterPhase('today');   // clicking a tab always restarts from HOY
+      enterPhase('today');
     });
     nav.appendChild(btn);
   });
@@ -580,24 +575,22 @@ function refreshTabsUI() {
 
 // ════════════════════════════════════════
 //  PHASE ROTATION: HOY → ALL-TIME → next game
+//  (GPU-composited progress bar via transform: scaleX)
 // ════════════════════════════════════════
 
 function enterPhase(phase) {
   if (phaseTimer) clearTimeout(phaseTimer);
-  if (rafProgress) cancelAnimationFrame(rafProgress);
 
   currentMode   = phase;
   phaseDuration = phase === 'today' ? HOY_MS : ALLTIME_MS;
-  progressStart = Date.now();
 
-  // Update mode label UI
   var lblToday   = document.getElementById('mode-label-today');
   var lblAlltime = document.getElementById('mode-label-alltime');
   if (lblToday)   lblToday.className   = 'mode-label' + (phase === 'today' ? ' active-mode' : '');
   if (lblAlltime) lblAlltime.className = 'mode-label' + (phase === 'alltime' ? ' active-mode' : '');
 
-  loadAndRender();
-  animateProgressBar();
+  loadAndRender(true);
+  animateProgressBarGPU(phaseDuration);
 
   phaseTimer = setTimeout(function () {
     if (currentMode === 'today') {
@@ -610,31 +603,29 @@ function enterPhase(phase) {
   }, phaseDuration);
 }
 
-function animateProgressBar() {
+function animateProgressBarGPU(durationMs) {
   var fill = document.getElementById('mode-progress-fill');
   if (!fill) return;
-  function tick() {
-    var pct = Math.min(((Date.now() - progressStart) / phaseDuration) * 100, 100);
-    fill.style.width = pct + '%';
-    rafProgress = requestAnimationFrame(tick);
-  }
-  tick();
+  fill.style.transition = 'none';
+  fill.style.transform  = 'scaleX(0)';
+  // Forzar lectura mínima para reiniciar transición en GPU sin loop JS
+  void fill.offsetWidth;
+  fill.style.transition = 'transform ' + durationMs + 'ms linear';
+  fill.style.transform  = 'scaleX(1)';
 }
 
 // ════════════════════════════════════════
-//  DATA ACCESSORS (Supabase Cache + Android Bridge Fallback)
+//  DATA ACCESSORS
 // ════════════════════════════════════════
 
 function loadScores() {
   var gameId = GAMES[currentGameIdx].id;
 
-  // 1) Si ya tenemos datos en el caché de Supabase, usarlos directamente
   var list = currentMode === 'today' ? cacheToday[gameId] : cacheAllTime[gameId];
   if (Array.isArray(list) && list.length > 0) {
     return list;
   }
 
-  // 2) Si en 'today' está vacío pero hay 'alltime', o si estamos en WebView Android legacy
   if (window.Android) {
     try {
       var json = currentMode === 'today'
@@ -657,36 +648,46 @@ function loadHallOfFame() {
 }
 
 // ════════════════════════════════════════
-//  RENDER ORCHESTRATOR
+//  RENDER ORCHESTRATOR (With DOM Diffing)
 // ════════════════════════════════════════
 
-function loadAndRender() {
-  var game = GAMES[currentGameIdx];
+var lastHeaderKey = '';
 
-  // Sub-header with game background image
-  var gh = document.getElementById('game-header');
-  if (gh) {
-    if (game.img) {
-      gh.style.backgroundImage =
-        'linear-gradient(90deg, rgba(10, 0, 55, 0.88) 0%, rgba(10, 0, 55, 0.55) 45%, rgba(10, 0, 55, 0.85) 100%), url("' + game.img + '")';
-    } else {
-      gh.style.backgroundImage = 'none';
+function loadAndRender(forceHeader) {
+  var game = GAMES[currentGameIdx];
+  var scores = loadScores();
+
+  var headerKey = game.id + '|' + currentMode;
+  if (forceHeader || headerKey !== lastHeaderKey) {
+    lastHeaderKey = headerKey;
+    var gh = document.getElementById('game-header');
+    if (gh) {
+      if (game.img) {
+        gh.style.backgroundImage =
+          'linear-gradient(90deg, rgba(10, 0, 55, 0.90) 0%, rgba(10, 0, 55, 0.58) 45%, rgba(10, 0, 55, 0.88) 100%), url("' + game.img + '")';
+      } else {
+        gh.style.backgroundImage = 'none';
+      }
+      gh.innerHTML =
+        '<div class="game-title-row">' +
+        '<img src="' + game.logo + '" class="game-logo-large" alt="' + game.label + '" decoding="async">' +
+        '<span class="game-name-large">' + game.label + '</span>' +
+        '</div>' +
+        '<span class="game-mode-badge">' +
+        (currentMode === 'today' ? '▶ CAMPEONES DE HOY' : '★ RÉCORDS HISTÓRICOS') +
+        '</span>';
     }
-    gh.innerHTML =
-      '<div class="game-title-row">' +
-      '<img src="' + game.logo + '" class="game-logo-large" alt="' + game.label + '">' +
-      '<span class="game-name-large">' + game.label + '</span>' +
-      '</div>' +
-      '<span class="game-mode-badge">' +
-      (currentMode === 'today' ? '▶ CAMPEONES DE HOY' : '★ RÉCORDS HISTÓRICOS') +
-      '</span>';
   }
 
-  renderScoreList(loadScores());
+  var sig = headerKey + '|' + JSON.stringify(scores);
+  if (sig === lastListSignature) return;
+  lastListSignature = sig;
+
+  renderScoreList(scores);
 }
 
 // ════════════════════════════════════════
-//  RENDER — Score list (always 10 rows)
+//  RENDER — Score list (Single-pass direct render)
 // ════════════════════════════════════════
 
 function renderScoreList(scores) {
@@ -696,7 +697,6 @@ function renderScoreList(scores) {
   var top = scores.slice(0, PLACEHOLDER_N);
   var maxScore = top.length > 0 ? (top[0].score || 1) : 1;
 
-  // Pad to PLACEHOLDER_N with empty entries
   while (top.length < PLACEHOLDER_N) top.push(null);
 
   list.innerHTML = top.map(function (entry, idx) {
@@ -704,10 +704,10 @@ function renderScoreList(scores) {
 
     if (!entry) {
       return (
-        '<div class="score-row empty" style="--row-idx:' + idx + '">' +
+        '<div class="score-row empty">' +
         '<div class="rank-badge">' + rank + '</div>' +
         '<div class="player-info"><div class="player-name">- - -</div></div>' +
-        '<div class="seg-bar">' + buildSegBar(0, rank) + '</div>' +
+        '<div class="seg-bar">' + buildSegBar(0) + '</div>' +
         '<div class="score-value">' +
         '<span class="score-number">???</span>' +
         '<span class="score-pts">PTS</span>' +
@@ -717,19 +717,20 @@ function renderScoreList(scores) {
     }
 
     var pct      = Math.round((entry.score / maxScore) * 100);
+    var filled   = Math.round(pct / 100 * SEG_COUNT);
     var rankCls  = rank === 1 ? 'rank-1' : rank === 2 ? 'rank-2' : rank === 3 ? 'rank-3' : '';
     var badgeCls = rank === 1 ? 'gold' : rank === 2 ? 'silver' : rank === 3 ? 'bronze' : '';
     var dateStr  = fmtDate(entry.playedDate || entry.achievedDate || '');
     var metaText = dateStr + (entry.boxId ? ' · ' + entry.boxId : '');
 
     return (
-      '<div class="score-row ' + rankCls + '" style="--row-idx:' + idx + '">' +
+      '<div class="score-row ' + rankCls + '">' +
       '<div class="rank-badge ' + badgeCls + '">' + rank + '</div>' +
       '<div class="player-info">' +
       '<div class="player-name">' + escHtml(entry.playerName) + '</div>' +
       (metaText ? '<div class="player-date">' + escHtml(metaText) + '</div>' : '') +
       '</div>' +
-      '<div class="seg-bar" data-pct="' + pct + '">' + buildSegBar(0, rank) + '</div>' +
+      '<div class="seg-bar">' + buildSegBar(filled) + '</div>' +
       '<div class="score-value">' +
       '<span class="score-number">' + fmtScore(entry.score) + '</span>' +
       '<span class="score-pts">PTS</span>' +
@@ -737,20 +738,9 @@ function renderScoreList(scores) {
       '</div>'
     );
   }).join('');
-
-  // Animate bars after two rAF frames
-  requestAnimationFrame(function () {
-    requestAnimationFrame(function () {
-      list.querySelectorAll('.seg-bar[data-pct]').forEach(function (bar) {
-        var pct = parseInt(bar.dataset.pct, 10) || 0;
-        var filled = Math.round(pct / 100 * SEG_COUNT);
-        bar.innerHTML = buildSegBar(filled, 0);
-      });
-    });
-  });
 }
 
-function buildSegBar(filledCount, rank) {
+function buildSegBar(filledCount) {
   var html = '';
   for (var i = 0; i < SEG_COUNT; i++) {
     html += '<div class="seg-block' + (i < filledCount ? ' filled' : '') + '"></div>';
@@ -760,19 +750,21 @@ function buildSegBar(filledCount, rank) {
 
 // ════════════════════════════════════════
 //  RENDER — Footer Hall of Fame + Live Ticker
-//  (Sin emojis — iconografía arcade limpia)
 // ════════════════════════════════════════
 
-function renderFooter() {
+function renderFooter(force) {
   var track = document.getElementById('footer-ticker-track');
   if (!track) return;
 
   var hof = loadHallOfFame();
   var records = hof.filter(function (d) { return d.record; });
 
+  var footerSig = JSON.stringify(recentLiveEvents) + '|' + JSON.stringify(records);
+  if (!force && footerSig === lastFooterSignature) return;
+  lastFooterSignature = footerSig;
+
   var items = [];
 
-  // 1. Últimos disparos en vivo desde las 18 cabinas (Realtime)
   recentLiveEvents.forEach(function (ev) {
     items.push(
       '<div class="ticker-item">' +
@@ -786,7 +778,6 @@ function renderFooter() {
     );
   });
 
-  // 2. Récords Históricos #1 de cada juego (Salón de la Fama)
   records.forEach(function (d) {
     items.push(
       '<div class="ticker-item">' +
@@ -800,7 +791,6 @@ function renderFooter() {
     );
   });
 
-  // 3. Mensajes arcade Toca Social (0% emojis)
   items.push(
     '<div class="ticker-item">' +
       '<span class="ticker-star">◆</span>' +
@@ -849,7 +839,6 @@ window.showRecordBreakCelebration = function (event) {
 
 // ════════════════════════════════════════
 //  WEB KIOSK SETTINGS & ROTATION
-//  (Replaces Android Web Kiosk SettingsActivity & RotatedWebView)
 // ════════════════════════════════════════
 
 function loadKioskSettings() {
@@ -891,9 +880,8 @@ function loadKioskSettings() {
 function applyScreenRotation(deg) {
   screenRotation = [0, 90, 180, 270].indexOf(deg) !== -1 ? deg : 270;
   document.body.classList.remove('rot-0', 'rot-90', 'rot-180', 'rot-270');
-  if (screenRotation !== 0) {
-    document.body.classList.add('rot-' + screenRotation);
-  }
+  document.body.classList.add('rot-' + screenRotation);
+  fitTvViewport();
 }
 
 function initKioskModal() {
@@ -935,7 +923,6 @@ function initKioskModal() {
   if (btnGear) btnGear.addEventListener('click', openModal);
   if (btnClose) btnClose.addEventListener('click', function () { modal.classList.add('hidden'); });
 
-  // 5 toques en el logo TOCA abre ajustes (igual que TapUnlockHandler.kt en android-web-kiosk)
   if (logoTrigger) {
     logoTrigger.addEventListener('click', function () {
       tapCount++;
@@ -1013,6 +1000,7 @@ function initKioskModal() {
       } catch (e) {}
 
       modal.classList.add('hidden');
+      lastListSignature = '';
       syncAllGamesFromSupabase(true);
       enterPhase('today');
     });
